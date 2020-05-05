@@ -1,0 +1,765 @@
+---
+title: 'HarvardX: PH125.9x: Liver Disease Classification'
+author: "Teri Duffie"
+date: "5/5/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, eval = TRUE, fig.height = 3, fig.width = 5, fig.align = "center")
+```
+# 1.Introduction
+
+The purpose of this project is to build a classification model that predicts whether or not a patient has liver disease based on the demographic and chemical compound information provided within the Indian Liver Patient Records dataset aquired from kaggle. Most disease classification algorithms are primarily concerned with precision (when the model predicts disease, how often is it correct?) and sensitivity (out of all patients who truly have disease, how often does the model predict disease?).  In the hypothetical scenario we describe later, the doctor has asked us to maximize precision.  We will discuss this in detail prior to building the machine learning models.  
+
+## Data
+This dataset was downloaded to kaggle from the UCI Machine Learning Repository: Lichman, M. (2013) Irvine, CA: University of California, School of Information and Computer Science. https://www.kaggle.com/uciml/indian-liver-patient-records
+
+The data contains 583 records for liver patients and non liver patients collected from North East of Andhra Pradesh, India.  Age and sex information is provided for each record as well as measurements for 8 chemical compounds present in the body.  Finally a "Dataset" column describes whether or not the patient actually has liver disease.
+
+## Key steps
+
+* Data import, preprocessing, cleaning.  The test set is split out initially and not used until model evaluation. 
+
+* Data exploration and visualization, noting insights.
+
+* Feature selection and modeling approach. 
+
+* Model evalution and selection of final model. Once the final model is chosen we make predictions against the test dataset and review the model performance across multiple metrics.
+
+* To conclude this report we summarize our findings and discuss limitations and potential improvements to the model.
+
+
+# 2.Methods/Analysis
+
+## Load required packages and download data from GitHub
+
+For the purpose of this project, the Indian Liver Patient Records dataset was uploaded to GitHub.  The code provided here automatically downloads the dataset into the R environment. 
+
+``` {r download, echo = TRUE}
+# HarvardX: PH125.9x Data Science Capstone: Predicting Liver Disease - Final
+
+#load necessary packages for analysis/modeling
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if(!require(reshape2)) install.packages("reshape2", repos = "http://cran.us.r-project.org")
+if(!require(forecast)) install.packages("forecast", repos = "http://cran.us.r-project.org")
+if(!require(janitor)) install.packages("janitor", repos = "http://cran.us.r-project.org")
+if(!require(matrixStats)) install.packages("matrixStats", repos = "http://cran.us.r-project.org")
+if(!require(gam)) install.packages("gam", repos = "http://cran.us.r-project.org")
+if(!require(BiocManager)) install.packages("BiocManager", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(ggpubr)) install.packages("ggpubr", repos = "http://cran.us.r-project.org")
+if(!require(WVPlots)) install.packages("WVPlots", repos = "http://cran.us.r-project.org")
+if(!require(MLmetrics)) install.packages("MLmetrics", repos = "http://cran.us.r-project.org")
+
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(gridExtra)
+library(knitr)
+library(reshape2)
+library(forecast)
+library(janitor)
+library(matrixStats)
+library(gam)
+library(randomForest)
+library(ggpubr)
+library(WVPlots)
+library(MLmetrics)
+library(BiocManager)
+
+
+#download and read in indian_liver_patient from GitHub
+
+url <- "https://raw.githubusercontent.com/tfitzg/CYO-Capstone-Indian-Liver-Disease/master/indian_liver_patient.csv"
+liver_whole <- read_csv(url)
+download.file(url, "indian_liver_patient.csv")
+
+tempfile()
+tmp_filename <- tempfile()
+download.file(url, tmp_filename)
+liver_whole <- read_csv(tmp_filename)
+file.remove(tmp_filename)
+
+```
+
+Let's review the structure of the dataset to ensure successful download.
+
+``` {r structure}
+str(liver_whole)
+```
+
+The download was successful. We note that "Dataset" is a numeric variable and "Gender" is character type, and we know that for our purposes both of these should be converted to factors later on.  The numeric variable type for the remainder of the columns seems correct. 
+
+Now we will break the data into two sets.  One set will be used for exploration and model building.  The second set ("test set") should be thought of as future data and will not be accessible to us until it is time to evaluate the final model.  At that time, we will have to do the same preprocessing on the test set that we do on the train set (which for now is called "liver").
+All data exploration and model training happens within the liver dataset (when we go to build models, this data is called the "train set").
+
+We choose 20% for the proportion of data going to the test set.  Since this dataset is relatively small, we want to ensure our final model is evaluated against a sample of reasonable size.  The 80% of data remaining for training is later partioned again with the bootstrap approach so we don't want to push this lower than 80% initially.
+``` {r partition, echo = TRUE}
+#covert to data frame from tibble for creating data partition
+liver_whole <- data.frame(liver_whole)
+
+#for consistency in results, we set the seed.  We then partion the data such that 20% is in "test set" and 80% remains for model building.
+set.seed(1, sample.kind = "Rounding") 
+test_index <- createDataPartition(y = liver_whole$Dataset, times = 1,
+                                  p = 0.2, list = FALSE) 
+liver <- liver_whole[-test_index,]
+test_set <- liver_whole[test_index,]
+```
+
+## Visualization and Preprocessing
+
+First we check out the first few rows of the dataset and see that it is already in tidy format, there is one record per row.
+``` {r head_liver}
+head(liver)
+```
+
+Now let's determine if there are missing values.
+
+``` {r check_NA, echo = TRUE}
+any(is.na(liver))
+```
+
+There are in fact missing values.  But where?
+``` {r locate_NAs}
+liver[!complete.cases(liver),] 
+```
+We see that there are 4 missing values and all are in the Albumin and Globulin Ratio column.  Running a quick summary of this column (below), we see that the 1st through 3rd quartile ranges from 0.7 to 1.1 which is quite tight.  We make the decision to replace the missing values with the mean value (0.96) and move on.
+
+``` {r replace_NAs}
+summary(liver$Albumin_and_Globulin_Ratio)
+#replace missing with mean Albumin and Globulin Ratio
+liver[is.na(liver)] <- mean(liver$Albumin_and_Globulin_Ratio, na.rm = TRUE) 
+```
+
+At this point let's change the "Dataset" column to a "Disease" column which indicates disease status and change Disease and Gender to factors.
+``` {r update_liver, echo = TRUE}
+#add factor Disease for clarity, remove "Dataset and change Gender to factor"
+liver <- liver %>% 
+  mutate(Disease = as.factor(ifelse(Dataset == "1", "Disease", "NoDisease")), 
+         Gender = as.factor(Gender)) %>% 
+  select(-Dataset)
+```
+
+Now we're going to review histograms for the numeric variables.  In doing this, we can accomplish a few things: we can visualize pontential outliers, we can view the shape of the distributions, and we can get a sense of the variance for each potential feature.  Let's start with the chemical compounds.
+
+``` {r histograms, fig.height = 8, fig.width = 8}
+TB <- liver %>% ggplot(aes(Total_Bilirubin)) +
+  geom_histogram(bins = 30, color = "green") + 
+  ggtitle("Total Bilirubin")
+
+DB <- liver %>% ggplot(aes(Direct_Bilirubin)) +
+  geom_histogram(bins = 30, color = "blue") + 
+  ggtitle("Direct Bilirubin")
+
+AP <- liver %>% ggplot(aes(Alkaline_Phosphotase)) +
+  geom_histogram(bins = 30, color = "yellow") + 
+  ggtitle("Alkaline Phosphotase")
+
+Al_A <- liver %>% ggplot(aes(Alamine_Aminotransferase)) +
+  geom_histogram(bins = 30, color = "orange") + 
+  ggtitle("Alamine Aminotransferase")
+
+Asp_A <- liver %>% ggplot(aes(Aspartate_Aminotransferase)) +
+  geom_histogram(bins = 30, color = "red") + 
+  ggtitle("Aspartate Aminotransferase")
+
+TP <- liver %>% ggplot(aes(Total_Protiens)) +
+  geom_histogram(bins = 30, color = "darkblue") + 
+  ggtitle("Total_Protiens")
+
+Alb <- liver %>% ggplot(aes(Albumin)) +
+  geom_histogram(bins = 30, color = "purple") + 
+  ggtitle("Albumin")
+
+A_G_R <- liver %>% ggplot(aes(Albumin_and_Globulin_Ratio)) +
+  geom_histogram(bins = 30, color = "pink") + 
+  ggtitle("Albumin and Globulin Ratio")
+
+#grid plot of all distributions
+grid.arrange(TB, DB, AP, Al_A, Asp_A, TP, Alb, A_G_R, ncol = 2)
+```
+We observe that Total Bilirubin, Direct Bilirubin, Alkaline Phosphotase, Alamine Aminotransferase and Aspartate Aminotransferage are positively skewed and possibly contain outliers (as the x-axis includes values much higher than where the majority of the distribution falls).  Total Protiens, Albumin and Albumin-Globulin Ratio have distributions that appear closer to normal and no points we feel confident in excluding as outliers. We can see the general range and variance for all compounds.
+
+Let's also understand the ages represented within the dataset and test for normality.
+``` {r ages, echo = TRUE}
+liver %>% ggplot(aes(Age)) +
+  geom_histogram(bins = 30) + 
+  ggtitle("Age")
+shapiro.test(liver$Age)
+```
+The ages are all reasonable (no bad data/outliers) and the distribution is reasonably close to normal, although the shapiro test for normality (p value < 0.05) shows that it is not in fact normal.
+
+We make the decision to leave the normal-ish data as is, but since there is an assumption of normality in some models we may want to build and the possibily that normal data would help build better models, we are going to transform the variables with very skewed distributions. The log10 transformation is chosen from the few we investigated as it pushes most of the variable distributions closer to normal.
+
+``` {r transformation, echo = TRUE}
+#formula loop for tranformations
+columns <- liver[, 3:7]
+trans_cols <- sapply(columns, function(t) {
+  transf <- log10(t)
+})
+
+trans_cols <- as.data.frame(trans_cols)
+```
+
+Let's review histograms of the transformed variables.
+
+``` {r transformed_hist, fig.height = 8, fig.width = 8}
+TB_t <- trans_cols %>% ggplot(aes(Total_Bilirubin)) +
+  geom_histogram(bins = 30, color = "green") + 
+  ggtitle("Total Bilirubin")
+
+DB_t <- trans_cols %>% ggplot(aes(Direct_Bilirubin)) +
+  geom_histogram(bins = 30, color = "blue") + 
+  ggtitle("Direct Bilirubin")
+
+AP_t <- trans_cols %>% ggplot(aes(Alkaline_Phosphotase)) +
+  geom_histogram(bins = 30, color = "yellow") + 
+  ggtitle("Alkaline Phosphotase")
+
+Al_A_t <- trans_cols %>% ggplot(aes(Alamine_Aminotransferase)) +
+  geom_histogram(bins = 30, color = "orange") + 
+  ggtitle("Alamine Aminotransferase")
+
+Asp_A_t <- trans_cols %>% ggplot(aes(Aspartate_Aminotransferase)) +
+  geom_histogram(bins = 30, color = "red") + 
+  ggtitle("Aspartate Aminotransferase")
+
+grid.arrange(TB_t, DB_t, AP_t, Al_A_t, Asp_A_t, ncol = 2)
+```
+
+We can see that we weren't totally successful in achieving normality with the transformation, and it's further confirmed by checking the qqplots.  Here are a couple of examples.
+
+``` {r qqplots, fig.width = 8}
+q1 <- ggqqplot(trans_cols$Aspartate_Aminotransferase, title = "Transformed Asp_Aminotransferase")
+qt1 <- ggqqplot(liver$Aspartate_Aminotransferase, title = "Original Asp_Aminotransferase")
+
+q2 <- ggqqplot(trans_cols$Total_Bilirubin, title = "Transformed Total_Bilirubin")
+qt2 <- ggqqplot(liver$Total_Bilirubin, title = "Original Total_Bilirubin")
+
+grid.arrange(q2, qt2, ncol = 2)
+grid.arrange(q1, qt1, ncol = 2)
+```
+
+However, the distributions are certainly closer to normal than they were previously, and we no longer see obvious outliers.  Since we don't totally understand the details of the data and can't confirm incorrect inputs, we really did not want to exclude any data.  We'll count the tranformation as a win, and move on by updating the table with the transformed data.  The updated data frame is called "new_liver".
+
+``` {r new_liver, echo = TRUE}
+
+#new_liver is the liver dataframe updated with transformed columns
+new_liver <- liver %>% mutate(Total_Bilirubin = trans_cols$Total_Bilirubin,
+                              Direct_Bilirubin = trans_cols$Direct_Bilirubin,
+                              Alkaline_Phosphotase = trans_cols$Alkaline_Phosphotase,
+                              Alamine_Aminotransferase = trans_cols$Alamine_Aminotransferase,
+                              Aspartate_Aminotransferase = trans_cols$Aspartate_Aminotransferase)
+```
+
+Now that we're happy with the state of the data, we can do some additional visualization.
+
+Let's begin by reviewing the breakdown on patient records by disease status as well as the number of records based on Gender.  We can see that there are many more patients with liver disease in the dataset than without, and note that prevalence will be a consideration when building/evaluating our models.  We also see that there are far more males in the dataset than females.
+
+``` {r bar_Sex_Disease}
+#count by disease status
+p1 <- new_liver %>%
+  group_by(Disease) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(Disease, count)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Count by Disease Status")
+#note need to deal with prevalence
+
+#Count of records by gender
+p2 <- new_liver %>%
+  group_by(Gender) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(Gender, count)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Count by Gender")
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+If we were to look at only the records with disease, we might be inclinded to think that the disease occurs far more often in males:
+
+``` {r table_Sex_Disease}
+new_liver %>%
+  group_by(Gender, Disease) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(Disease, count)) +
+  geom_bar(stat = "identity", aes(fill = Gender))
+
+#table for disease records only, breakdown by sex
+has_disease_female <- round(mean((new_liver$Gender == "Female" & new_liver$Disease == "Disease")/(new_liver$Disease == "Disease"), na.rm = TRUE), 3)
+has_disease_male <- round(mean((new_liver$Gender == "Male" & new_liver$Disease == "Disease")/(new_liver$Disease == "Disease"), na.rm = TRUE), 3)
+data.table("Disease" = "Has Disease", "Female" = has_disease_female, "Male" = has_disease_male) %>% knitr:: kable()
+```
+
+But actually, females in this dataset are also more likely to have the disease than not.  We can see that the male percentage with disease is ~10% higher than female and we'll look into whether this is statistically significant later on.
+
+``` {r table_ratios}
+new_liver %>%
+  group_by(Gender, Disease) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(Gender, count)) +
+  geom_bar(stat = "identity", aes(fill = Disease))
+
+#Disease count by Gender
+new_liver %>%
+  group_by(Gender, Disease) %>%
+  summarize(Frequency = n()) %>%
+  knitr::kable()
+
+#table with proportions
+prop_female_wdisease <- round(mean((new_liver$Gender == "Female" & new_liver$Disease == "Disease")/((new_liver$Gender == "Female" & new_liver$Disease == "Disease")+ (new_liver$Gender == "Female" & new_liver$Disease == "NoDisease")), na.rm = TRUE), 3)
+prop_male_wdisease <- round(mean((new_liver$Gender == "Male" & new_liver$Disease == "Disease")/((new_liver$Gender == "Male" & new_liver$Disease == "Disease")+ (new_liver$Gender == "Male" & new_liver$Disease == "NoDisease")), na.rm = TRUE), 3)
+
+data.table("Gender" = c("Female", "Male"), "Proportion_with_Disease" = c(prop_female_wdisease, prop_male_wdisease)) %>% knitr:: kable()
+```
+
+If we break this down a bit further by including age, we can see that the patients with liver disease tend to be slightly older (at the midpoint) than those without liver disease, although there is a lot of overlap in the boxplots.
+
+``` {r sex_age_boxplots, fig.width = 7}
+#Age/Sex and Disease status
+new_liver %>%
+  group_by(Gender, Disease) %>%
+  mutate(Gender_status = paste(Gender, Disease, sep = "-")) %>%
+  ggplot(aes(Gender_status, Age)) +
+  geom_boxplot(aes(fill = Disease)) +
+  scale_y_continuous(breaks = c(10, 20, 30, 40, 50, 60, 70, 80, 90))
+```
+
+Another way to investigate age as a predictor for disease involves binning by age group. Here we bin by 20 year increments with age_bin 1 including those younger than 20 years and age_bin 4 including people 60 years and older. We can see from the bar chart and the table below that the youngest two bins (1&2) have a lower tendency to have liver disease than the older two groups.  But again, within this dataset, all age bins are more likely to have the disease than not.
+
+``` {r age_bins}
+#stratify by Age
+new_liver <- new_liver %>% mutate(age_bin = as.factor(case_when(Age < 20 ~ '1',
+                                                                Age >= 20 & Age <= 40 ~ '2',
+                                                                Age >= 40 & Age <= 60 ~ '3',
+                                                                Age >= 60 ~ '4')))
+
+new_liver %>%
+  group_by(age_bin, Disease) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(age_bin, count)) +
+  geom_bar(stat = "identity", aes(fill = Disease))
+
+new_liver %>% 
+  group_by(age_bin, Disease) %>%
+  summarize(count = n()) %>%
+  spread(Disease, count) %>%
+  mutate(Disease_proportion = Disease/(Disease + NoDisease)) %>%
+  knitr::kable()
+```
+
+Now let's explore the chemical compounds in more detail.  First of all, we know that we want to avoid multicollinearity in machine learning models and we noticed that several of the compounds had similar names (e.g. Total Bilirubin and Direct Bilirubin) so we want to understand if some of the features could be correlated.
+
+``` {r correlations, fig.height = 4, fig.width = 6}
+my_data <- new_liver[, c(3:10)]
+correlations <- round(cor(my_data, use = "pairwise"), 3) #use pairwise bc of 4 missing values
+print(correlations) #consider 0.7 to be strong correlation
+
+melted_cor <- melt(correlations)
+ggplot(data = melted_cor, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "black", high = "red", mid = "white") +
+  theme(axis.text.x = element_text(angle=60, hjust=1)) +
+  ggtitle("Correlation Matrix of Chemical Compounds")
+```
+
+Just as we suspected, a number of compounds are highly correlated.  When we start building models, we'll only select one feature for those pairs with correlation coefficient > 0.7.
+
+To be diligent, we reviewed each highly correlated pair in closer detail, including stratifying by Gender and age_bin, to see if the relationship holds.  In all cases, the linear correlation was strong and thus we stand by the decision to reduce to uncorrelated features. Below are a couple of examples of the stratification exercise.
+
+```{r correlations_stratified_Gender_Age}
+#Bilirubin
+new_liver %>%
+  ggplot(aes(Total_Bilirubin, Direct_Bilirubin)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  facet_wrap( ~ age_bin) +
+  ggtitle("Relationship Across Age Bin")
+
+#Aminotransferases
+new_liver %>%
+  ggplot(aes(Alamine_Aminotransferase, Aspartate_Aminotransferase)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  facet_wrap( ~ Gender) +
+  ggtitle("Relationship Across Gender")
+```
+
+To further aid in feature selection, let's try to visulize the potential impact each feature has on the presence of liver disease.    
+
+```{r boxplots_all, fig.height = 6, fig.width = 9}
+#boxplots of Disease status vs features 
+b_1 <- new_liver %>%
+  ggplot(aes(Disease, Total_Bilirubin)) +
+  geom_boxplot(aes(fill = Disease)) 
+
+b_1_2 <- new_liver %>%
+  ggplot(aes(Disease, Direct_Bilirubin)) +
+  geom_boxplot(aes(fill = Disease)) 
+
+b_2 <- new_liver %>%
+  ggplot(aes(Disease, Alkaline_Phosphotase)) +
+  geom_boxplot(aes(fill = Disease)) 
+
+b_3_1 <- new_liver %>%
+  ggplot(aes(Disease, Alamine_Aminotransferase)) +
+  geom_boxplot(aes(fill = Disease)) 
+
+b_3 <- new_liver %>%
+  ggplot(aes(Disease, Aspartate_Aminotransferase)) +
+  geom_boxplot(aes(fill = Disease)) 
+
+b_4 <- new_liver %>%
+  ggplot(aes(Disease, Albumin)) +
+  geom_boxplot(aes(fill = Disease)) 
+
+b_5 <- new_liver %>%
+  ggplot(aes(Disease, Total_Protiens)) +
+  geom_boxplot(aes(fill = Disease)) 
+
+b_6 <- new_liver %>%
+  ggplot(aes(Disease, Albumin_and_Globulin_Ratio)) +
+  geom_boxplot(aes(fill = Disease)) 
+
+b_7 <- new_liver %>%
+  ggplot(aes(Disease, Age)) +
+  geom_boxplot(aes(fill = Disease))
+
+grid.arrange(b_1, b_1_2, b_2, b_3_1, b_3, b_4, b_5, b_6, b_7, ncol = 3)
+```
+Here are the takeways from the box plots: Total Bilirubin, Direct Bilirubin, Alkaline Phosphotase, and both Alamine and Aspartate Aminotranserases tend to be higher in patients with liver disease than those without. We already mentioned that age tended to be slightly higher when disease is present and we see that again here.  Albumin and Albumin:Globulin Ratio tend to be lower in the patients with disease while Total Protiens seems to have no impact (the boxes are almost completely overlapping).
+
+We have a couple of other tools we can use in factor selection.  Here we run a chi squared analysis on both Gender and age_bin, and in both cases we see statistical significance (p value < 0.05).  Both should be included as factors in our models, though where age is concerned we should choose either age_bin or the numeric Age value (not both).
+
+```{r chi_sq}
+#reducing "new liver" to significant factors
+
+#Gender - Chi-sq
+freq <- new_liver %>%
+  group_by(Gender, Disease) %>%
+  summarize(Frequency = n())
+
+two_by_two <- data.frame(Disease = c("Disease", "NoDisease"),
+                         female = c(freq$Frequency[1], freq$Frequency[2]),
+                         male = c(freq$Frequency[3], freq$Frequency[4]))
+chisq_test <- two_by_two %>% select(-Disease) %>% chisq.test()
+knitr::kable(two_by_two)
+cat("p value =", chisq_test$p.value) 
+
+#age_bin - Chi-sq
+age_bin <- new_liver %>%
+  group_by(age_bin, Disease) %>%
+  summarize(count = n())
+
+age_table <- data.frame(Disease = c("Disease", "NoDisease"),
+                        age_1 = c(age_bin$count[1], age_bin$count[1]),
+                        age_2 = c(age_bin$count[3], age_bin$count[4]),
+                        age_3 = c(age_bin$count[5], age_bin$count[6]),
+                        age_4 = c(age_bin$count[7], age_bin$count[8]))
+chisq_test_age <- age_table %>% select(-Disease) %>% chisq.test()
+knitr::kable(age_table)
+cat("p value =", chisq_test_age$p.value)
+```
+
+
+## Modeling approach
+We could also use statistical tests for selection of the numeric features (such as t tests, or non-parametric tests for non-normal distributions).  However, we decide to include the following factors due to our boxplot visualization as well as the lack of correlation: Total_Bilirubin, Alkaline_Phosphotase, Aspartate_Aminotransferase, Albumin, Gender, Age. When evaluating models, we could continue to reduce features if they aren't found to be significant.  For our purposes, we won't continue reducing features as we want to evaluate several models and this report could get extremely lengthy.  We don't expect that the extra factors are hurting the model performance.
+
+As we stated initially, we have (created) a hypothetical scenario in which a doctor is asking us to build a predictive model, maximizing precision. The doctor has reason to believe that all patients within this dataset are at high risk for liver disease, hence the high proportion within the dataset having liver disease.  We know that we could simply guess liver disease is present every time and obtain an accuracy and precision of ~70.4% on the training set, but this does us little good in our predictive ability moving forward. The doctor plans to use our algorithm to help justify recommending a costly and invasive procedure, thus she wants to know with as much certainty as possible that this is the correct decision.  As for the patients in which the model deems to not have disease, she will continue monitoring and likely recommend further testing.  So while ideally both precision and sensitivty would be very high we are prioritizing precision and tuning/selecting a model with this in mind.
+
+We are going to evaluate a number of supervised machine learning models: logistic regression, random forest, k nearest neighbors, loess, and one unsupervised model: k means clustering.
+
+We start by liming both the training set and the test set to the features we selected and applying the same transformation that we performed on the liver (train set) to the test set data.  We should also make sure there is no data missing from the test set. Note that while we are preprocessing the test set data at this point, we are not using the test data for building/tuning the models or for evaluating model performance until the final model is chosen.
+
+```{r test_train_preprocessed, echo = TRUE}
+#check test set for NAs
+any(is.na(test_set)) 
+
+#choose features and assign to train_set
+train_set <- new_liver %>%
+  select(Total_Bilirubin, Alkaline_Phosphotase, Aspartate_Aminotransferase, Albumin, 
+         Gender, Age, Disease)
+
+#select same features for test_set
+test_set <- test_set %>%
+  mutate(Disease = as.factor(ifelse(Dataset == "1", "Disease", "NoDisease")), 
+         Gender = as.factor(Gender)) %>%
+  select(Total_Bilirubin, Alkaline_Phosphotase, Aspartate_Aminotransferase, Albumin, 
+         Gender, Age, Disease, -Dataset)
+
+
+#we need to apply log10 transformation to the highly skewed features in test_set which we did for train_set previously
+test_set <- test_set %>% mutate(Total_Bilirubin = log10(Total_Bilirubin), 
+                                Alkaline_Phosphotase = log10(Alkaline_Phosphotase), 
+                                Aspartate_Aminotransferase = log10(Aspartate_Aminotransferase))
+```
+
+Because we intend to use models which utilize euclidian distance (knn, k means clustering), we need to center and scale the data.  Doing this should not negatively impact the other models which don't require scaling.
+
+``` {r center_scale, echo = TRUE}
+
+#convert features to matrix and Disease response (y) to factor vector
+train_x <- train_set %>% 
+  select(-Disease) %>% 
+  data.matrix()
+train_y <- train_set$Disease
+
+#center and scale the matrix train_x
+train_x_centered <- sweep(train_x, 2, colMeans(train_x))
+train_x_scaled <- sweep(train_x_centered, 2, colSds(train_x), FUN = "/") 
+
+
+#apply scaling to test_set, using data from train_set since test is "unknown"
+#first convert test set to matrix and response vector
+test_x <- test_set %>% 
+  select(-Disease) %>% 
+  data.matrix()
+test_y <- test_set$Disease
+
+#obtain train set column means and standard deviations
+means <- colMeans(train_x)
+std_devs <- colSds(train_x)
+
+test_x_centered <- sweep(test_x, 2, means)
+test_x_scaled <- sweep(test_x_centered, 2, std_devs, FUN = "/")
+
+#Our final training and test feature matrices
+train_x <- train_x_scaled
+test_x <- test_x_scaled
+#train_y and test_y are just the Disease response vectors previously defined
+```
+
+Now we are ready to build and evaluate machine learning models.
+
+# 3. Modeling Results
+
+For all of the supervised models we are planning to evaluate using the train function, we use the default cross validation: 25 bootstrap samples comprised of 25% of train set. We can evaluate performance of the model by reviewing the confusion matrix comprised only of train set data.
+
+Let's start simple with logistic regression. 
+``` {r glm_results, echo = TRUE}
+#set seed for conistency in results
+set.seed(1, sample.kind = "Rounding")
+
+#train logistic regression model
+train_glm <- train(train_x, train_y, method = "glm", family = "binomial")
+
+#confusion matrix for train cross validation
+cm_glm <- confusionMatrix(train_glm, "none")
+print(cm_glm)
+#precision of the glm model
+Precision_glm <- cm_glm$table[1,1]/(cm_glm$table[1,1] + cm_glm$table[1,2])
+cat("Precision =", Precision_glm)
+```
+
+The glm model obtained a precision of 73.2% on the train set data.  While this is improved from the 70.4% we would obtain from a totally biased model (guess Disease every time), we are hoping to achieve much better precision for the doctor's use case.
+
+As mentioned previously, one thing we would probably do in a real-life scenario is reduce the model to significant features. We can see that in the case of the glm, we could simplify the model by eliminating Albumin, Gender and Alkaline Phosphotase from the feature list as they all have p values > 0.05.  Another way to view this is by variable importance and we can see that the three features not found to be significant have lower importance in the model.
+
+```{r glm_summary}
+summary(train_glm$finalModel)
+
+varImp(train_glm, scale = FALSE)
+```
+
+Because our purpose right now is to evaluate several models, so we aren't going to be going through the excerise of reducing/simplifying each model.
+
+The next model we want to try is a random forest.  A random forest is essentially a collection of uncorrelated decision trees and the final model is built by committee, thus obtaining a more accurate result than that of any individual tree.  First let's tune the mtry parameter, which is the number of predictors that will be randomly sampled at each split. For train control, we use prSummary to allow us to train the model using precision as the metric to maximize.
+
+```{r mtry_rf, echo = TRUE}
+trctrl    = trainControl(summaryFunction = prSummary, classProbs = TRUE)
+
+set.seed(1, sample.kind = "Rounding")
+train_rf_1 <- train(train_x, train_y, 
+                    method = "rf",
+                    trControl=trctrl,
+                    metric = "Precision",
+                    tuneGrid = data.frame(mtry = seq(1, 5, 1)))
+print(train_rf_1)
+```
+An mtry value of 4 resulted in the highest precision.  Next we can tune node size.  This needs to be done manually as it is not a tuneable parameter using the train function with the rf method in R. Nodesize is the minimum number of samples that can be split into a node.  Ideally, we could have tuned mtry and nodesize simulateously rather than successively, and we're aware we might not be finding the ideal parameter values by this approach.
+
+```{r nodesize_rf, echo = TRUE}
+#now manually select nodesize, setting mtry to 4
+set.seed(1, sample.kind = "Rounding")
+nodesize <- seq(2, 20, 2)
+Precision <- sapply(nodesize, function(ns){
+  train(train_x, train_y, method = "rf", 
+        trControl=trctrl,
+        metric = "Precision", 
+        tuneGrid = data.frame(mtry = 4),
+        nodesize = ns)$results$Precision
+})
+qplot(nodesize, Precision)
+```
+A nodesize of 12 resulted in the highest precision.  Finally, we build the random forest model using mtry = 4 and nodesize = 12 and obtain a precision of 0.746.
+
+```{r random_forest, echo = TRUE}
+#build model (mtry = 4, nodesize = 12)
+set.seed(1, sample.kind = "Rounding")
+train_rf <- train(train_x, train_y, 
+                  method = "rf",
+                  trControl=trctrl,
+                  metric = "Precision",
+                  tuneGrid = data.frame(mtry = 4),
+                  nodesize = 12)
+
+#confusion matrix for train cross validation
+cm_rf <- confusionMatrix(train_rf, "none")
+print(cm_rf)
+#calculate precision
+Precision_rf <- cm_rf$table[1,1]/(cm_rf$table[1,1] + cm_rf$table[1,2])
+cat("Precision =", Precision_rf)
+```
+We have slightly better precision using random forest than glm, but we still want to see if another approach would be better.
+
+K-nearest neighbors is a non-parametric method, and in the case of classification, the record will be classified by a plurality vote of it's closest neighbors. "k" is the number of neighbors which we consider for making the decision. We will now determine the k which maximizes precision in the train dataset.
+
+```{r k_knn, echo = TRUE}
+set.seed(1, sample.kind = "Rounding")
+train_knn_1 <- train(train_x, train_y,
+                   method = "knn",
+                   trControl = trctrl,
+                   metric = "Precision",
+                   tuneGrid = data.frame(k = seq(3, 100, 5)))
+ggplot(train_knn_1, highlight = TRUE)
+train_knn_1$bestTune
+```
+We can visualize the tradeoff we are making between precision and sensitivity (recall). You can see below that with large values of k, sensitivity gets very high...because with large k we would tend to predict Disease due to the prevalence of Disease in the dataset.
+
+```{r visualize_Prec_Sens}
+train_knn_1$results %>% 
+  ggplot(aes(Recall, Precision)) +
+  geom_line() +
+  geom_label(aes(label = k)) +
+  xlim(0.73, 0.95) +
+  ylim(0.68, 0.78)
+```
+
+We set k=3, train the model and evaluate the bootstrap cross validation. We can see that we obtained the highest precision yet, 0.759.... but we still want to see if we can do better.
+
+```{r knn_model, echo = TRUE}
+set.seed(1, sample.kind = "Rounding")
+train_knn <- train(train_x, train_y,
+                     method = "knn",
+                     tuneGrid = data.frame(k = 3))  
+
+#confusion matrix for knn
+cm_knn <- confusionMatrix(train_knn, "none")
+print(cm_knn)
+#precision for knn
+Precision_knn <- cm_knn$table[1,1]/(cm_knn$table[1,1] + cm_knn$table[1,2])
+cat("Precision =", Precision_knn)
+```
+
+Perhaps loess, which uses a kernel to make a more smooth prediction will be the answer.  We will tune the span, evaluating 5%-35%, but we choose to leave degree = 1. (The code crashed when I tried degree = 1 and 2 and I read about a bug online that was related to this)
+
+```{r loess, echo = TRUE}
+set.seed(1, sample.kind = "Rounding")
+grid <- expand.grid(span = seq(0.05, 0.35, len = 10), degree = 1) 
+train_loess_1 <- train(train_x, train_y,
+                     method = "gamLoess",
+                     tuneGrid = grid,
+                     trControl = trctrl,
+                     metric = "Precision")
+ggplot(train_loess_1, highlight = TRUE)
+
+#span = 0.05 had highest precision
+train_loess <- train(train_x, train_y,
+                    method = "gamLoess",
+                    span = 0.05)
+
+#confusion matrix
+cm_loess <- confusionMatrix(train_loess, "none")
+print(cm_loess)
+#Precision
+Precision_loess <- cm_loess$table[1,1]/(cm_loess$table[1,1] + cm_loess$table[1,2])
+cat("Precision =", Precision_loess)
+```
+The final loess model using the best tune (span = 0.05) resulted in a precision of only 0.735, slightly better than glm, but not as good as knn or random forest.
+
+At this point we want to shift gears and try an unsupervised model approach.  With K-means clustering, we can use the training feature space to establish the two optimal centroids.  Then we can see how well the actual disease status in the training set is explained by these two groups (2-means).
+
+```{r k_means, echo = TRUE}
+set.seed(1, sample.kind = "Rounding")
+k <- kmeans(train_x, centers = 2, n = 25)
+print(k)
+```
+We can see by the centroids associated with each cluster, that theoretically cluster 2 should indicate disease (higher Total_Bilirubin, Alkaline Phosphotase, Aspartate Aminotransferase, Age and Gender = M).  Let's create a table and determine how well, within the train set, that each cluster predicts the disease status.
+
+```{r cluster_table, echo = TRUE}
+train_x_df <- data.frame(cbind(k$cluster, train_x))
+cluster_table <- cbind(Disease = train_y, train_x_df)
+cluster_table$cluster <- as.character(k$cluster)
+
+cluster_table <- cluster_table %>% 
+  mutate(cluster_result = case_when(Disease == "Disease" & cluster == 2 ~ "True Positive", 
+                                    Disease == "Disease" & cluster == 1 ~ "False Negative",
+                                    Disease == "NoDisease" & cluster == 1 ~ "True Negative",
+                                    Disease == "NoDisease" & cluster == 2 ~ "False Positive"))
+cluster_precision <- (sum(cluster_table$cluster_result == "True Positive"))/
+  (sum((cluster_table$cluster_result == "True Positive")
+       + (cluster_table$cluster_result == "False Positive")))
+
+cluster_accuracy <- (sum((cluster_table$cluster_result == "True Positive") + 
+                           (cluster_table$cluster_result == "True Negative")))/
+  (sum((cluster_table$cluster_result == "True Positive") + 
+         (cluster_table$cluster_result == "False Positive")
+       + (cluster_table$cluster_result == "True Negative") + 
+         (cluster_table$cluster_result == "False Negative")))
+
+cat("Precision =", cluster_precision)
+cat("Accuracy =", cluster_accuracy)
+```
+
+Wow! Precision using k-means on the training set is all the way up to ~91.6%!  This is by far the highest precision we've seen.  The accuracy dropped to ~59% which indicates some other issues (in our case the biggest concern being that sensitivy must be lower), but given the goal to optimize precision, it appears k-means is the best option.
+
+We can try to visualize the results to understand what is happening.  We can see some of the results of clustering below.  Cluster 1 should be associated with NoDisease.  Thus the red triangles are true negatives while the red circles are false negatives.  Cluster 2 should be associated with disease...so the blue circles are true positives while the blue triangles are false positives.  You can see that there are very few false positives (blue triangles) which makes sense given the high precision.  But you can also understand why there are so many false negatives in the performance of the algorithm as the red circles and red triangles do appear to be clustered close together and difficult or impossible to be distinguished by distance.
+
+```{r cluster_visualization, fig.width = 7}
+cluster_table %>%
+  ggplot(aes(Aspartate_Aminotransferase, Albumin, colour = cluster)) +
+  geom_point(aes(shape = Disease), size = 2)
+  
+cluster_table %>%
+  ggplot(aes(Total_Bilirubin, Alkaline_Phosphotase, colour = cluster)) +
+  geom_point(aes(shape = Disease), size = 2)
+```
+
+After reviewing these results, we believe that the k-means clustering algorithm is the best model we can build to predict disease, given that precision is the most important metric to the doctor. We can see that using this model, we predict NoDisease more often than we predict Disease, but we're very happy that when we predict Disease we're right more than 90% of the time.
+
+## Final model and evaluation against test set
+
+Finally, we use the cluster centers from the training set and predict the disease status for each record in the test set by determing which cluster center has the shortest distance to the record. The final model results for the test set predictions are shown in the confusion matrix below.
+
+```{r predict_k_means, echo = TRUE}
+predict_kmeans <- function(x, k) {
+  centers <- k$centers    # extract cluster centers
+  #calculate distance to cluster centers
+  distances <- sapply(1:nrow(x), function(i){
+    apply(centers, 1, function(y) dist(rbind(x[i,], y)))
+  })
+  max.col(-t(distances))  # select cluster with min distance to center
+}
+
+kmeans_preds <- ifelse(predict_kmeans(test_x, k) == 2, "Disease", "NoDisease") 
+confusionMatrix(data = factor(kmeans_preds), reference = test_y, mode = "everything")
+```
+
+As you can see, we were very successful in optimizing precision... nearly 96%!  Even though we don't love the overall accuracy at ~62% or the sensitivity of ~52%, the model is quite good for the doctor's use case and we were aware there would be a trade-off when deciding to optmize precision.  
+
+# 4. Conclusion
+
+This report contains the performance evaluation of several machine learning algorithms using the Indian Liver Patient dataset, as well as the cleaning, visualizations, analysis, and preprocessing required to build better performing models.  The goal of this project was to determine which algorithm among logistic regression, knn, loess, random forest and k-means clustering would achieve the highest precision.  Ultimately, k-means clustering was chosen to predict the disease status within the test set and a precision of nearly 96% was achieved.
+
+Had the goal of the project been to maximize accuracy or sensitivity, a model other than k-means would have been better suited.  We could have taken a similar approach, but tuned the pararmeters by optimizing accuracy or sensitiviy within the training set cross validation (train function). In the case of sensitivity, we would have needed to be cautious of the Disease prevalence as a sensitivty of 100% (and accuracy of 70%) could have been achieved by guessing Disease in every case for the training set data, but this might not have gone well when evaluated against the "future" test set. Given this issue, another metric that would have made sense to optimize is the F1 score, which is the harmonic mean between precision and sensitivity.  By tuning the supervised models against the F1 score, we would have ended up with lower precision but better sensitivity (fewer false negatives).
+
+While working on this project, I found that it is tempting to try to keep improving the models and achieving better metrics across the board ("a perfect model").  But after several iterations and many long days, I found that there are always going to be tradeoffs... hence the saying, "all models are wrong, but some are useful".  In the case of this dataset, we saw when viewing the boxplots (by disease status) that portions of all of the features are overlapping, and this was also evident by visualizing the clustering analysis on the train set. There wasn't a clean split for any feature where Disease is on one side and No Disease is on the other. So while we can build models using the tendency of features to be higher (or lower) when disease is present, we can't explain all of the results by using only the data provided.
+
+Overall I thought this was a great exercise and I'm very happy with the result of 96% precision.
